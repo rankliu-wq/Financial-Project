@@ -2,6 +2,7 @@
 
 __all__ = [
     "charts",
+    "comparison",
     "data",
     "engine",
     "metrics",

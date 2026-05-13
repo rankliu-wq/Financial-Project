@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -17,25 +18,45 @@ class StrategyOutput:
     indicators: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class ParamSpec:
+    key: str
+    label: str
+    kind: str
+    default: Any
+    min_value: float | int | None = None
+    max_value: float | int | None = None
+    step: float | int | None = None
+    format: str | None = None
+    options: tuple[Any, ...] = ()
+    help: str | None = None
+
+
+@dataclass(frozen=True)
+class StrategySpec:
+    name: str
+    factory: Callable[..., StrategyOutput]
+    params: tuple[ParamSpec, ...] = ()
+
+
 def generate_strategy(
     prices: pd.DataFrame,
     strategy_name: str,
-    short_window: int = 20,
-    long_window: int = 60,
-    rsi_window: int = 14,
-    rsi_buy: float = 30,
-    rsi_sell: float = 70,
+    **params: Any,
 ) -> StrategyOutput:
-    if strategy_name == "買入持有":
-        return buy_and_hold(prices)
-    if strategy_name == "均線交叉":
-        return sma_cross(prices, short_window, long_window)
-    if strategy_name == "RSI 反轉":
-        return rsi_reversal(prices, rsi_window, rsi_buy, rsi_sell)
-    raise StrategyError(f"未知策略：{strategy_name}")
+    spec = STRATEGY_SPECS.get(strategy_name)
+    if spec is None:
+        raise StrategyError(f"未知策略：{strategy_name}")
+
+    resolved_params = {param.key: params.get(param.key, param.default) for param in spec.params}
+    return spec.factory(prices, **resolved_params)
 
 
-def buy_and_hold(prices: pd.DataFrame) -> StrategyOutput:
+def strategy_names() -> list[str]:
+    return list(STRATEGY_SPECS)
+
+
+def buy_and_hold(prices: pd.DataFrame, **_: Any) -> StrategyOutput:
     signal = pd.Series(1, index=prices.index, name="Signal", dtype=int)
     indicators = pd.DataFrame(index=prices.index)
     return StrategyOutput("買入持有", signal, indicators)
@@ -93,6 +114,53 @@ def rsi_reversal(
     return StrategyOutput("RSI 反轉", signal, indicators)
 
 
+def bollinger_bands(
+    prices: pd.DataFrame,
+    bb_window: int,
+    bb_std: float,
+    bb_exit: str,
+) -> StrategyOutput:
+    if bb_window < 5:
+        raise StrategyError("布林通道週期需要至少 5 天。")
+    if bb_std <= 0:
+        raise StrategyError("標準差倍數必須大於 0。")
+    if len(prices) < bb_window:
+        raise StrategyError("價格資料不足以計算布林通道。")
+
+    close = prices["Close"]
+    middle = close.rolling(bb_window, min_periods=bb_window).mean()
+    rolling_std = close.rolling(bb_window, min_periods=bb_window).std(ddof=0)
+    upper = middle + bb_std * rolling_std
+    lower = middle - bb_std * rolling_std
+
+    signal = pd.Series(0, index=prices.index, name="Signal", dtype=int)
+    in_position = False
+    for date, close_value in close.items():
+        if np.isnan(middle.loc[date]) or np.isnan(upper.loc[date]) or np.isnan(lower.loc[date]):
+            signal.loc[date] = int(in_position)
+            continue
+
+        if not in_position and close_value < lower.loc[date]:
+            in_position = True
+        elif in_position:
+            if bb_exit == "上軌出場" and close_value > upper.loc[date]:
+                in_position = False
+            elif bb_exit == "中軌出場" and close_value > middle.loc[date]:
+                in_position = False
+        signal.loc[date] = int(in_position)
+
+    multiplier = f"{bb_std:g}"
+    indicators = pd.DataFrame(
+        {
+            f"BB 中軌 {bb_window}": middle,
+            f"BB 上軌 {bb_window}x{multiplier}": upper,
+            f"BB 下軌 {bb_window}x{multiplier}": lower,
+        },
+        index=prices.index,
+    )
+    return StrategyOutput("布林通道", signal, indicators)
+
+
 def calculate_rsi(close: pd.Series, window: int) -> pd.Series:
     delta = close.diff()
     gains = delta.clip(lower=0)
@@ -102,3 +170,34 @@ def calculate_rsi(close: pd.Series, window: int) -> pd.Series:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50).rename("RSI")
+
+
+STRATEGY_SPECS = {
+    "買入持有": StrategySpec("買入持有", buy_and_hold),
+    "均線交叉": StrategySpec(
+        "均線交叉",
+        sma_cross,
+        (
+            ParamSpec("short_window", "短均線", "int", 20, 2, 250, 1),
+            ParamSpec("long_window", "長均線", "int", 60, 3, 400, 1),
+        ),
+    ),
+    "RSI 反轉": StrategySpec(
+        "RSI 反轉",
+        rsi_reversal,
+        (
+            ParamSpec("rsi_window", "RSI 週期", "int", 14, 2, 80, 1),
+            ParamSpec("rsi_buy", "買進門檻", "int", 30, 1, 99, 1),
+            ParamSpec("rsi_sell", "出場門檻", "int", 70, 1, 99, 1),
+        ),
+    ),
+    "布林通道": StrategySpec(
+        "布林通道",
+        bollinger_bands,
+        (
+            ParamSpec("bb_window", "通道週期", "int", 20, 5, 250, 1),
+            ParamSpec("bb_std", "標準差倍數", "float", 2.0, 0.5, 4.0, 0.1, "%.1f"),
+            ParamSpec("bb_exit", "出場方式", "select", "中軌出場", options=("中軌出場", "上軌出場")),
+        ),
+    ),
+}

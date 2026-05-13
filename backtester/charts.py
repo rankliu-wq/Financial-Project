@@ -140,3 +140,72 @@ def monthly_heatmap(heatmap: pd.DataFrame) -> go.Figure:
         template="plotly_white",
     )
     return fig
+
+
+def comparison_performance_chart(normalized: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    palette = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2"]
+    for idx, symbol in enumerate(normalized.columns):
+        fig.add_trace(
+            go.Scatter(
+                x=normalized.index,
+                y=normalized[symbol],
+                name=symbol,
+                mode="lines",
+                line={"width": 2.4, "color": palette[idx % len(palette)]},
+                hovertemplate=f"{symbol}<br>%{{x|%Y-%m-%d}}<br>指數：%{{y:.2f}}<extra></extra>",
+            )
+        )
+    fig.add_hline(y=100, line_dash="dash", line_color="#94a3b8")
+    fig.update_layout(
+        height=460,
+        margin={"l": 10, "r": 10, "t": 28, "b": 10},
+        template="plotly_white",
+        legend={"orientation": "h", "y": 1.08, "x": 0},
+        yaxis_title="起始日 = 100",
+    )
+    return fig
+
+
+def comparison_metric_chart(metrics: pd.DataFrame) -> go.Figure:
+    display = metrics[["總報酬", "CAGR", "年化波動", "Sharpe", "最大回撤"]].copy()
+    percent_metrics = ["總報酬", "CAGR", "年化波動", "最大回撤"]
+    for metric in percent_metrics:
+        display[metric] = display[metric] * 100
+
+    fig = make_subplots(
+        rows=2,
+        cols=3,
+        subplot_titles=["總報酬 %", "CAGR %", "年化波動 %", "Sharpe", "最大回撤 %"],
+        vertical_spacing=0.18,
+        horizontal_spacing=0.1,
+    )
+    placements = {
+        "總報酬": (1, 1),
+        "CAGR": (1, 2),
+        "年化波動": (1, 3),
+        "Sharpe": (2, 1),
+        "最大回撤": (2, 2),
+    }
+    colors = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2"]
+    for metric, (row, col) in placements.items():
+        fig.add_trace(
+            go.Bar(
+                x=display.index,
+                y=display[metric],
+                name=metric,
+                marker_color=[colors[index % len(colors)] for index in range(len(display.index))],
+                showlegend=False,
+                text=[f"{value:.2f}" for value in display[metric]],
+                textposition="outside",
+                cliponaxis=False,
+            ),
+            row=row,
+            col=col,
+        )
+    fig.update_layout(
+        height=560,
+        margin={"l": 10, "r": 10, "t": 44, "b": 10},
+        template="plotly_white",
+    )
+    return fig

@@ -10,6 +10,8 @@ import requests
 import yfinance as yf
 import yfinance.cache as yf_cache
 
+from backtester.timeframes import DEFAULT_TIMEFRAME, TIMEFRAME_SPECS
+
 
 REQUIRED_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 OPTIONAL_COLUMNS = ["Adj Close"]
@@ -33,23 +35,27 @@ def fetch_yahoo_prices(
     start: pd.Timestamp,
     end: pd.Timestamp,
     allow_weekends: bool,
+    timeframe: str = DEFAULT_TIMEFRAME,
 ) -> MarketData:
     symbol = symbol.strip().upper()
     if not symbol:
         raise DataValidationError("請輸入金融商品代號。")
+
+    if timeframe not in TIMEFRAME_SPECS:
+        raise DataValidationError(f"不支援的時間週期：{timeframe}。")
 
     _configure_yfinance_cache()
     errors: list[str] = []
     data = pd.DataFrame()
 
     try:
-        data = _download_with_yahoo_chart_api(symbol, start, end)
+        data = _download_with_yahoo_chart_api(symbol, start, end, timeframe)
     except DataValidationError as exc:
         errors.append(str(exc))
 
     if data.empty:
         try:
-            data = _download_with_yfinance(symbol, start, end)
+            data = _download_with_yfinance(symbol, start, end, timeframe)
         except DataValidationError as exc:
             errors.append(str(exc))
 
@@ -63,6 +69,7 @@ def fetch_yahoo_prices(
         data.columns = data.columns.get_level_values(0)
 
     prices = normalize_price_frame(data, allow_weekends=allow_weekends)
+    prices = _resample_prices(prices, timeframe)
     return MarketData(symbol=symbol, prices=prices, source="Yahoo Finance")
 
 
@@ -71,12 +78,14 @@ def _configure_yfinance_cache() -> None:
     yf_cache.set_cache_location(str(CACHE_DIR))
 
 
-def _download_with_yfinance(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+def _download_with_yfinance(symbol: str, start: pd.Timestamp, end: pd.Timestamp, timeframe: str) -> pd.DataFrame:
+    spec = TIMEFRAME_SPECS[timeframe]
     try:
         return yf.download(
             symbol,
             start=start.date().isoformat(),
             end=(end + pd.Timedelta(days=1)).date().isoformat(),
+            interval=spec.yahoo_interval,
             progress=False,
             auto_adjust=False,
             group_by="column",
@@ -87,14 +96,15 @@ def _download_with_yfinance(symbol: str, start: pd.Timestamp, end: pd.Timestamp)
         raise DataValidationError(f"Yahoo Finance 下載失敗：{exc}") from exc
 
 
-def _download_with_yahoo_chart_api(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+def _download_with_yahoo_chart_api(symbol: str, start: pd.Timestamp, end: pd.Timestamp, timeframe: str) -> pd.DataFrame:
+    spec = TIMEFRAME_SPECS[timeframe]
     start_ts = int(start.normalize().timestamp())
     end_ts = int((end.normalize() + pd.Timedelta(days=1)).timestamp())
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {
         "period1": start_ts,
         "period2": end_ts,
-        "interval": "1d",
+        "interval": spec.yahoo_interval,
         "events": "history",
         "includeAdjustedClose": "true",
     }
@@ -129,9 +139,15 @@ def _download_with_yahoo_chart_api(symbol: str, start: pd.Timestamp, end: pd.Tim
     if not timestamps or not quote:
         return pd.DataFrame()
 
+    timezone = (result.get("meta") or {}).get("exchangeTimezoneName")
+    dates = pd.to_datetime(timestamps, unit="s", utc=True)
+    if timezone:
+        dates = dates.tz_convert(timezone)
+    dates = dates.tz_localize(None)
+
     frame = pd.DataFrame(
         {
-            "Date": pd.to_datetime(timestamps, unit="s").normalize(),
+            "Date": dates,
             "Open": quote.get("open"),
             "High": quote.get("high"),
             "Low": quote.get("low"),
@@ -149,11 +165,32 @@ def _has_dead_local_proxy() -> bool:
     return any("127.0.0.1:9" in os.environ.get(key, "") for key in proxy_keys)
 
 
+def _resample_prices(prices: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    rule = TIMEFRAME_SPECS[timeframe].resample_rule
+    if rule is None:
+        return prices
+
+    resampled = prices.resample(rule).agg(
+        {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Adj Close": "last",
+            "Volume": "sum",
+        }
+    )
+    resampled = resampled.dropna(subset=["Open", "High", "Low", "Close"])
+    if resampled.empty:
+        raise DataValidationError(f"{timeframe} 重採樣後沒有可用價格資料。")
+    return resampled
+
+
 def load_csv_prices(file: BinaryIO, allow_weekends: bool) -> MarketData:
     try:
         raw = pd.read_csv(file)
     except pd.errors.EmptyDataError as exc:
-        raise DataValidationError("CSV 檔案是空的，請上傳包含日線 OHLCV 的檔案。") from exc
+        raise DataValidationError("CSV 檔案是空的，請上傳包含 K 線 OHLCV 的檔案。") from exc
     except Exception as exc:  # pragma: no cover - pandas gives many parser subclasses
         raise DataValidationError(f"CSV 讀取失敗：{exc}") from exc
 
