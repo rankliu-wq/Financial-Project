@@ -5,11 +5,19 @@ import io
 import pandas as pd
 import streamlit as st
 
-from backtester.charts import equity_chart, monthly_heatmap, price_chart
+from backtester.charts import (
+    comparison_metric_chart,
+    comparison_performance_chart,
+    equity_chart,
+    monthly_heatmap,
+    price_chart,
+)
+from backtester.comparison import DEFAULT_COMPARISON_SYMBOLS, compare_symbols, parse_symbol_list
 from backtester.data import DataValidationError, fetch_yahoo_prices, load_csv_prices
 from backtester.engine import run_backtest
 from backtester.metrics import monthly_returns, performance_summary
-from backtester.strategies import StrategyError, generate_strategy
+from backtester.strategies import STRATEGY_SPECS, ParamSpec, StrategyError, generate_strategy, strategy_names
+from backtester.timeframes import DEFAULT_TIMEFRAME, TIMEFRAME_SPECS, annualization_for_timeframe, timeframe_labels
 
 
 st.set_page_config(page_title="金融商品回測分析工具", page_icon="📈", layout="wide")
@@ -55,13 +63,52 @@ def money(value: float) -> str:
     return f"{value:,.0f}"
 
 
+def render_strategy_param(param: ParamSpec):
+    if param.kind == "int":
+        return st.sidebar.number_input(
+            param.label,
+            min_value=int(param.min_value),
+            max_value=int(param.max_value),
+            value=int(param.default),
+            step=int(param.step or 1),
+            help=param.help,
+        )
+    if param.kind == "float":
+        return st.sidebar.number_input(
+            param.label,
+            min_value=float(param.min_value),
+            max_value=float(param.max_value),
+            value=float(param.default),
+            step=float(param.step or 0.1),
+            format=param.format,
+            help=param.help,
+        )
+    if param.kind == "select":
+        return st.sidebar.selectbox(
+            param.label,
+            options=list(param.options),
+            index=list(param.options).index(param.default),
+            help=param.help,
+        )
+    raise StrategyError(f"不支援的策略參數型態：{param.kind}")
+
+
 def sidebar_inputs() -> dict:
     st.sidebar.header("回測設定")
     data_source = st.sidebar.radio("資料來源", ["Yahoo Finance", "CSV 上傳"], horizontal=True)
+    timeframe = st.sidebar.selectbox(
+        "時間週期",
+        timeframe_labels(),
+        index=timeframe_labels().index(DEFAULT_TIMEFRAME),
+        help="CSV 模式會將上傳資料視為已經是此週期；Yahoo 模式會依週期下載或重採樣。",
+    )
     allow_weekends = st.sidebar.checkbox("允許週末資料", value=True, help="加密貨幣通常會有週末資料；股票與 ETF 可關閉。")
+    timeframe_note = TIMEFRAME_SPECS[timeframe].note
+    if timeframe_note:
+        st.sidebar.caption(timeframe_note)
 
     today = pd.Timestamp.today().normalize()
-    default_start = today - pd.DateOffset(years=3)
+    default_start = today - pd.Timedelta(days=TIMEFRAME_SPECS[timeframe].default_lookback_days)
     date_range = st.sidebar.date_input("分析日期", value=(default_start.date(), today.date()))
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = [pd.Timestamp(item) for item in date_range]
@@ -75,17 +122,16 @@ def sidebar_inputs() -> dict:
     else:
         uploaded_file = st.sidebar.file_uploader("上傳 CSV", type=["csv"])
 
-    strategy_name = st.sidebar.selectbox("策略", ["買入持有", "均線交叉", "RSI 反轉"])
-    params = {}
-    if strategy_name == "均線交叉":
-        left, right = st.sidebar.columns(2)
-        params["short_window"] = left.number_input("短均線", min_value=2, max_value=250, value=20, step=1)
-        params["long_window"] = right.number_input("長均線", min_value=3, max_value=400, value=60, step=1)
-    elif strategy_name == "RSI 反轉":
-        params["rsi_window"] = st.sidebar.number_input("RSI 週期", min_value=2, max_value=80, value=14, step=1)
-        left, right = st.sidebar.columns(2)
-        params["rsi_buy"] = left.number_input("買進門檻", min_value=1, max_value=99, value=30, step=1)
-        params["rsi_sell"] = right.number_input("出場門檻", min_value=1, max_value=99, value=70, step=1)
+    comparison_raw = st.sidebar.text_area(
+        "比較標的",
+        value=", ".join(DEFAULT_COMPARISON_SYMBOLS),
+        help="以逗號、空白或換行分隔。比較模組使用 Yahoo Finance 資料。",
+        height=78,
+    )
+
+    strategy_name = st.sidebar.selectbox("策略", strategy_names())
+    strategy_spec = STRATEGY_SPECS[strategy_name]
+    params = {param.key: render_strategy_param(param) for param in strategy_spec.params}
 
     st.sidebar.divider()
     initial_cash = st.sidebar.number_input("初始資金", min_value=1000.0, value=1_000_000.0, step=10_000.0)
@@ -94,11 +140,13 @@ def sidebar_inputs() -> dict:
 
     return {
         "data_source": data_source,
+        "timeframe": timeframe,
         "allow_weekends": allow_weekends,
         "start_date": start_date,
         "end_date": end_date,
         "symbol": symbol,
         "uploaded_file": uploaded_file,
+        "comparison_symbols": parse_symbol_list(comparison_raw),
         "strategy_name": strategy_name,
         "strategy_params": params,
         "initial_cash": float(initial_cash),
@@ -108,8 +156,20 @@ def sidebar_inputs() -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def get_yahoo_data(symbol: str, start_date: pd.Timestamp, end_date: pd.Timestamp, allow_weekends: bool):
-    return fetch_yahoo_prices(symbol, start_date, end_date, allow_weekends)
+def get_yahoo_data(symbol: str, start_date: pd.Timestamp, end_date: pd.Timestamp, allow_weekends: bool, timeframe: str):
+    return fetch_yahoo_prices(symbol, start_date, end_date, allow_weekends, timeframe)
+
+
+@st.cache_data(show_spinner=False)
+def get_comparison_data(
+    symbols: tuple[str, ...],
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    allow_weekends: bool,
+    annualization: int,
+    timeframe: str,
+):
+    return compare_symbols(list(symbols), start_date, end_date, allow_weekends, annualization, timeframe)
 
 
 def get_csv_data(uploaded_file, allow_weekends: bool):
@@ -130,6 +190,55 @@ def show_metrics(summary: dict[str, float | int]) -> None:
     cols[1].metric("Sharpe", f"{float(summary['sharpe']):.2f}")
     cols[2].metric("勝率", pct(float(summary["win_rate"])))
     cols[3].metric("交易次數", f"{int(summary['trade_count'])}")
+
+
+def show_comparison(result) -> None:
+    st.caption(f"共同比較期間：{result.start.date()} 至 {result.end.date()}，共 {len(result.normalized):,} 個共同資料點")
+
+    best_rows = []
+    judgement = {
+        "總報酬": "越高越好",
+        "CAGR": "越高越好",
+        "年化波動": "越低越好",
+        "Sharpe": "越高越好",
+        "最大回撤": "越接近 0 越好",
+        "期末指數": "越高越好",
+    }
+    for metric in ["總報酬", "CAGR", "年化波動", "Sharpe", "最大回撤"]:
+        best_rows.append(
+            {
+                "比較項目": metric,
+                "較佳標的": result.best_symbols[metric],
+                "判斷方式": judgement[metric],
+            }
+        )
+
+    left, right = st.columns([0.58, 0.42])
+    with left:
+        st.plotly_chart(comparison_performance_chart(result.normalized), use_container_width=True)
+    with right:
+        st.dataframe(pd.DataFrame(best_rows), use_container_width=True, hide_index=True)
+
+    display = result.metrics.copy()
+    for column in ["總報酬", "CAGR", "年化波動", "最大回撤"]:
+        display[f"{column} %"] = display[column] * 100
+    display = display[["總報酬 %", "CAGR %", "年化波動 %", "Sharpe", "最大回撤 %", "期末指數"]]
+    st.dataframe(
+        display,
+        use_container_width=True,
+        column_config={
+            "總報酬 %": st.column_config.NumberColumn("總報酬 %", format="%.2f%%"),
+            "CAGR %": st.column_config.NumberColumn("CAGR %", format="%.2f%%"),
+            "年化波動 %": st.column_config.NumberColumn("年化波動 %", format="%.2f%%"),
+            "Sharpe": st.column_config.NumberColumn("Sharpe", format="%.2f"),
+            "最大回撤 %": st.column_config.NumberColumn("最大回撤 %", format="%.2f%%"),
+            "期末指數": st.column_config.NumberColumn("期末指數", format="%.2f"),
+        },
+    )
+    st.plotly_chart(comparison_metric_chart(result.metrics), use_container_width=True)
+
+    if result.warnings:
+        st.warning("部分標的無法納入比較：" + "；".join(result.warnings))
 
 
 def main() -> None:
@@ -153,6 +262,7 @@ def main() -> None:
                     inputs["start_date"],
                     inputs["end_date"],
                     inputs["allow_weekends"],
+                    inputs["timeframe"],
                 )
             else:
                 market_data = get_csv_data(inputs["uploaded_file"], inputs["allow_weekends"])
@@ -169,7 +279,7 @@ def main() -> None:
             inputs["commission_rate"],
             inputs["slippage_rate"],
         )
-        annualization = 365 if inputs["allow_weekends"] else 252
+        annualization = annualization_for_timeframe(inputs["timeframe"], inputs["allow_weekends"])
         summary = performance_summary(result.equity, result.trades, inputs["initial_cash"], annualization)
         heatmap = monthly_returns(result.equity)
 
@@ -183,12 +293,14 @@ def main() -> None:
     header_left, header_right = st.columns([0.72, 0.28])
     header_left.subheader(f"{market_data.symbol} · {strategy.name}")
     header_right.caption(
-        f"{market_data.source}｜{market_data.prices.index.min().date()} 至 {market_data.prices.index.max().date()}｜{len(market_data.prices):,} 筆日線"
+        f"{market_data.source}｜{inputs['timeframe']}｜{market_data.prices.index.min()} 至 {market_data.prices.index.max()}｜{len(market_data.prices):,} 根 K 線"
     )
 
     show_metrics(summary)
 
-    tab_price, tab_equity, tab_monthly, tab_trades, tab_data = st.tabs(["價格與訊號", "權益與回撤", "月報酬", "交易紀錄", "資料預覽"])
+    tab_price, tab_equity, tab_monthly, tab_compare, tab_trades, tab_data = st.tabs(
+        ["價格與訊號", "權益與回撤", "月報酬", "標的比較", "交易紀錄", "資料預覽"]
+    )
     with tab_price:
         st.plotly_chart(
             price_chart(market_data.prices, strategy.indicators, result.events, f"{market_data.symbol} 價格與交易訊號"),
@@ -201,6 +313,20 @@ def main() -> None:
             st.info("資料期間不足以計算月報酬。")
         else:
             st.plotly_chart(monthly_heatmap(heatmap), use_container_width=True)
+    with tab_compare:
+        try:
+            with st.spinner("讀取比較標的資料中..."):
+                comparison = get_comparison_data(
+                    tuple(inputs["comparison_symbols"]),
+                    inputs["start_date"],
+                    inputs["end_date"],
+                    inputs["allow_weekends"],
+                    annualization,
+                    inputs["timeframe"],
+                )
+            show_comparison(comparison)
+        except DataValidationError as exc:
+            st.error(str(exc))
     with tab_trades:
         if result.trades.empty:
             st.info("這段期間沒有已完成交易。")
