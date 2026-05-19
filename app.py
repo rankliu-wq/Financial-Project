@@ -8,11 +8,12 @@ import streamlit as st
 from backtester.charts import (
     comparison_metric_chart,
     comparison_performance_chart,
+    correlation_heatmap,
     equity_chart,
     monthly_heatmap,
     price_chart,
 )
-from backtester.comparison import DEFAULT_COMPARISON_SYMBOLS, compare_symbols, parse_symbol_list
+from backtester.comparison import DEFAULT_COMPARISON_SYMBOLS, compare_symbols, correlation_pairs, parse_symbol_list
 from backtester.data import DataValidationError, fetch_yahoo_prices, load_csv_prices
 from backtester.engine import run_backtest
 from backtester.metrics import monthly_returns, performance_summary
@@ -236,6 +237,31 @@ def show_comparison(result) -> None:
         },
     )
     st.plotly_chart(comparison_metric_chart(result.metrics), use_container_width=True)
+
+    st.subheader("標的相關係數")
+    st.caption("以各標的在共同期間內的報酬率計算；越接近 1 代表走勢越同向，越接近 -1 代表越反向。")
+    corr_left, corr_right = st.columns([0.58, 0.42])
+    with corr_left:
+        st.plotly_chart(correlation_heatmap(result.correlation), use_container_width=True)
+    with corr_right:
+        st.dataframe(
+            result.correlation.round(3),
+            use_container_width=True,
+            column_config={
+                column: st.column_config.NumberColumn(column, format="%.3f")
+                for column in result.correlation.columns
+            },
+        )
+
+    pairwise = correlation_pairs(result.correlation)
+    if len(pairwise) > 3:
+        with st.expander("查看各標的兩兩相關係數表"):
+            st.dataframe(
+                pairwise,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"相關係數": st.column_config.NumberColumn("相關係數", format="%.3f")},
+            )
 
     if result.warnings:
         st.warning("部分標的無法納入比較：" + "；".join(result.warnings))
