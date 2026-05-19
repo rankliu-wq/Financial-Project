@@ -18,6 +18,7 @@ class ComparisonResult:
     metrics: pd.DataFrame
     normalized: pd.DataFrame
     returns: pd.DataFrame
+    correlation: pd.DataFrame
     best_symbols: dict[str, str]
     warnings: list[str]
     start: pd.Timestamp
@@ -69,6 +70,7 @@ def compare_symbols(
 
     normalized = price_frame.divide(price_frame.iloc[0]).multiply(100)
     returns = price_frame.pct_change().dropna()
+    correlation = returns.corr()
     metrics = _comparison_metrics(normalized, returns, annualization)
     best_symbols = _best_by_metric(metrics)
 
@@ -76,6 +78,7 @@ def compare_symbols(
         metrics=metrics,
         normalized=normalized,
         returns=returns,
+        correlation=correlation,
         best_symbols=best_symbols,
         warnings=warnings,
         start=price_frame.index.min(),
@@ -121,3 +124,18 @@ def _best_by_metric(metrics: pd.DataFrame) -> dict[str, str]:
     best.update({metric: str(metrics[metric].idxmin()) for metric in lower_is_better})
     best.update({metric: str(metrics[metric].idxmax()) for metric in closer_to_zero_is_better})
     return best
+
+
+def correlation_pairs(correlation: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    columns = list(correlation.columns)
+    for left_index, left_symbol in enumerate(columns):
+        for right_symbol in columns[left_index + 1 :]:
+            rows.append(
+                {
+                    "標的 A": left_symbol,
+                    "標的 B": right_symbol,
+                    "相關係數": correlation.loc[left_symbol, right_symbol],
+                }
+            )
+    return pd.DataFrame(rows).sort_values("相關係數", ascending=False, ignore_index=True)

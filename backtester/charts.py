@@ -209,3 +209,32 @@ def comparison_metric_chart(metrics: pd.DataFrame) -> go.Figure:
         template="plotly_white",
     )
     return fig
+
+
+def correlation_heatmap(correlation: pd.DataFrame) -> go.Figure:
+    symbols = correlation.columns.tolist()
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=correlation.values,
+            x=symbols,
+            y=symbols,
+            zmin=-1,
+            zmax=1,
+            colorscale=[
+                [0, "#2563eb"],
+                [0.5, "#f8fafc"],
+                [1, "#dc2626"],
+            ],
+            colorbar={"title": "相關係數"},
+            text=correlation.round(2).astype(str).values,
+            texttemplate="%{text}",
+            hovertemplate="%{y} vs %{x}<br>相關係數：%{z:.3f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        height=max(360, 70 + 42 * max(len(symbols), 1)),
+        margin={"l": 10, "r": 10, "t": 24, "b": 10},
+        template="plotly_white",
+        xaxis={"side": "top"},
+    )
+    return fig
