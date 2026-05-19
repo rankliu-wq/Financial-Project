@@ -5,7 +5,7 @@ import io
 import pandas as pd
 import pytest
 
-from backtester.comparison import compare_symbols, parse_symbol_list
+from backtester.comparison import compare_symbols, correlation_pairs, parse_symbol_list
 from backtester.data import DataValidationError, fetch_yahoo_prices, load_csv_prices, normalize_price_frame
 from backtester.engine import run_backtest
 from backtester.metrics import performance_summary
@@ -106,6 +106,9 @@ def test_compare_symbols_uses_common_dates(monkeypatch) -> None:
     assert list(result.metrics.index) == ["AAA", "BBB"]
     assert result.normalized.index.min() == prices_b.index.min()
     assert "總報酬" in result.best_symbols
+    assert result.correlation.shape == (2, 2)
+    assert result.correlation.loc["AAA", "AAA"] == pytest.approx(1)
+    assert len(correlation_pairs(result.correlation)) == 1
 
 
 def test_four_hour_timeframe_resamples_hourly_prices(monkeypatch) -> None:
